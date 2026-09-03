@@ -9,6 +9,7 @@ import * as jwt from 'jsonwebtoken';
 import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as axios from 'axios';
 import * as xml2js from 'xml2js';
 import * as yaml from 'js-yaml';
@@ -31,9 +32,21 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Fixed (CWE-798): the session signing secret is no longer hard-coded in
+// source. It is read from the environment (SESSION_SECRET, already declared in
+// .env). Outside production a missing value falls back to an ephemeral,
+// cryptographically random per-process secret so local/demo runs still work
+// without shipping a credential; production fails closed instead.
+const SESSION_SECRET: string = process.env.SESSION_SECRET ||
+  (process.env.NODE_ENV === 'production' ? null : crypto.randomBytes(32).toString('hex'));
+
+if (!SESSION_SECRET) {
+  throw new Error('SESSION_SECRET environment variable must be set');
+}
+
 // VULNERABILITY: Insecure session configuration (CWE-1004)
 app.use(session({
-  secret: 'insecure-typescript-session-secret',
+  secret: SESSION_SECRET,
   resave: true,
   saveUninitialized: true,
   cookie: {
