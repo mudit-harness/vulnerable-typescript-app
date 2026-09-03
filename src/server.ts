@@ -21,9 +21,22 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // VULNERABILITY: Hardcoded secrets (CWE-798)
-const JWT_SECRET: string = 'super_secret_typescript_key_12345';
 const ADMIN_PASSWORD: string = 'admin123';
 const DB_PASSWORD: string = 'password123';
+
+// Fixed (CWE-798): the JWT signing secret is no longer hard-coded in source. It
+// is read from the environment (JWT_SECRET, already declared in .env). Outside
+// production a missing value falls back to an ephemeral, cryptographically
+// random per-process secret so local/demo runs still work without shipping a
+// credential; production fails closed instead.
+// ROTATE: the removed literal was a demo placeholder, but it stays in git
+// history — if any deployment ever used it, revoke/reissue the signing key.
+const JWT_SECRET: string = process.env.JWT_SECRET ||
+  (process.env.NODE_ENV === 'production' ? null : crypto.randomBytes(32).toString('hex'));
+
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable must be set');
+}
 
 // VULNERABILITY: Debug mode enabled in production
 app.set('env', 'development');
@@ -89,7 +102,8 @@ app.post('/api/login', (req: Request, res: Response) => {
 
   const user = users.find((u: User) => u.username === username);
   if (user) {
-    // VULNERABILITY: Weak JWT signing with predictable secret (CWE-327)
+    // Fixed (CWE-798): signed with the environment-provided JWT_SECRET above,
+    // not a secret hard-coded in this source file.
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
     res.json({ success: true, token, user });
   } else {
