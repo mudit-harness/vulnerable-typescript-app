@@ -9,6 +9,7 @@ import * as jwt from 'jsonwebtoken';
 import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { URL } from 'url';
 import * as crypto from 'crypto';
 import * as axios from 'axios';
 import * as xml2js from 'xml2js';
@@ -380,11 +381,51 @@ app.get('/api/token', (req: Request, res: Response) => {
   res.json({ token });
 });
 
-// VULNERABILITY: Open Redirect (CWE-601)
+// Internal base used only to resolve a requested redirect destination for
+// validation. It is never sent to the client.
+const REDIRECT_VALIDATION_BASE = 'https://redirect.invalid';
+const MAX_REDIRECT_LENGTH = 2048;
+
+// Allowlist for /redirect destinations: application-relative paths on this
+// origin only. Validation is done on the parsed URL rather than substring or
+// startsWith checks on the raw string, so an absolute URL, a protocol-relative
+// '//evil.com', its backslash variants and non-http(s) schemes such as
+// 'javascript:' all resolve to a different origin and are rejected. Returns the
+// safe path (re-serialized from the parser) or null when not allowed.
+function safeRedirectPath(target: string): string {
+  if (typeof target !== 'string' || !target || target.length > MAX_REDIRECT_LENGTH) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(target, REDIRECT_VALIDATION_BASE);
+  } catch (error: any) {
+    return null;
+  }
+  if (parsed.origin !== REDIRECT_VALIDATION_BASE) {
+    return null;
+  }
+  // Only the path/query/fragment the parser recognised is used; a normalized
+  // path that would still be read as protocol-relative by a browser (leading
+  // '//') is not a valid same-origin destination.
+  const redirectPath: string = parsed.pathname + parsed.search + parsed.hash;
+  if (redirectPath.charAt(0) !== '/' || redirectPath.charAt(1) === '/') {
+    return null;
+  }
+  return redirectPath;
+}
+
 app.get('/redirect', (req: Request, res: Response) => {
   const url: string = req.query.url as string;
-  // Vulnerable: No validation of redirect URL
-  res.redirect(url);
+  // Fixed (CWE-601): the destination is validated against the same-origin
+  // allowlist above before any redirect happens, and only the re-serialized
+  // safe path is used as the Location value.
+  const safePath: string = safeRedirectPath(url);
+  if (!safePath) {
+    res.status(400).json({ error: 'Invalid redirect target' });
+    return;
+  }
+  res.redirect(safePath);
 });
 
 // VULNERABILITY: Prototype Pollution (CWE-1321)
