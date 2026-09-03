@@ -6,7 +6,7 @@ import * as bodyParser from 'body-parser';
 import * as cookieParser from 'cookie-parser';
 import * as session from 'express-session';
 import * as jwt from 'jsonwebtoken';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as axios from 'axios';
@@ -83,11 +83,18 @@ app.post('/api/login', (req: Request, res: Response) => {
   }
 });
 
-// VULNERABILITY: Command Injection (CWE-78)
+// Allowlist for ping targets: DNS hostnames and IPv4 literals only.
+// Rejects shell metacharacters, whitespace and leading '-' (option injection).
+const PING_HOST_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+
 app.get('/api/ping', (req: Request, res: Response) => {
   const host: string = req.query.host as string;
-  // Vulnerable: User input directly in exec command
-  exec(`ping -c 3 ${host}`, (error: any, stdout: string, stderr: string) => {
+  if (!host || host.length > 253 || !PING_HOST_PATTERN.test(host)) {
+    res.status(400).json({ success: false, message: 'Invalid host' });
+    return;
+  }
+  // Fixed (CWE-78): no shell, argv array passed to execFile, host validated above
+  execFile('ping', ['-c', '3', host], (error: any, stdout: string, stderr: string) => {
     if (error) {
       res.json({ error: error.message, stdout, stderr });
     } else {
