@@ -6,9 +6,11 @@ import * as bodyParser from 'body-parser';
 import * as cookieParser from 'cookie-parser';
 import * as session from 'express-session';
 import * as jwt from 'jsonwebtoken';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { URL } from 'url';
+import * as crypto from 'crypto';
 import * as axios from 'axios';
 import * as xml2js from 'xml2js';
 import * as yaml from 'js-yaml';
@@ -19,9 +21,22 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // VULNERABILITY: Hardcoded secrets (CWE-798)
-const JWT_SECRET: string = 'super_secret_typescript_key_12345';
 const ADMIN_PASSWORD: string = 'admin123';
 const DB_PASSWORD: string = 'password123';
+
+// Fixed (CWE-798): the JWT signing secret is no longer hard-coded in source. It
+// is read from the environment (JWT_SECRET, already declared in .env). Outside
+// production a missing value falls back to an ephemeral, cryptographically
+// random per-process secret so local/demo runs still work without shipping a
+// credential; production fails closed instead.
+// ROTATE: the removed literal was a demo placeholder, but it stays in git
+// history — if any deployment ever used it, revoke/reissue the signing key.
+const JWT_SECRET: string = process.env.JWT_SECRET ||
+  (process.env.NODE_ENV === 'production' ? null : crypto.randomBytes(32).toString('hex'));
+
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable must be set');
+}
 
 // VULNERABILITY: Debug mode enabled in production
 app.set('env', 'development');
@@ -31,9 +46,21 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Fixed (CWE-798): the session signing secret is no longer hard-coded in
+// source. It is read from the environment (SESSION_SECRET, already declared in
+// .env). Outside production a missing value falls back to an ephemeral,
+// cryptographically random per-process secret so local/demo runs still work
+// without shipping a credential; production fails closed instead.
+const SESSION_SECRET: string = process.env.SESSION_SECRET ||
+  (process.env.NODE_ENV === 'production' ? null : crypto.randomBytes(32).toString('hex'));
+
+if (!SESSION_SECRET) {
+  throw new Error('SESSION_SECRET environment variable must be set');
+}
+
 // VULNERABILITY: Insecure session configuration (CWE-1004)
 app.use(session({
-  secret: 'insecure-typescript-session-secret',
+  secret: SESSION_SECRET,
   resave: true,
   saveUninitialized: true,
   cookie: {
@@ -75,7 +102,8 @@ app.post('/api/login', (req: Request, res: Response) => {
 
   const user = users.find((u: User) => u.username === username);
   if (user) {
-    // VULNERABILITY: Weak JWT signing with predictable secret (CWE-327)
+    // Fixed (CWE-798): signed with the environment-provided JWT_SECRET above,
+    // not a secret hard-coded in this source file.
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
     res.json({ success: true, token, user });
   } else {
@@ -83,11 +111,18 @@ app.post('/api/login', (req: Request, res: Response) => {
   }
 });
 
-// VULNERABILITY: Command Injection (CWE-78)
+// Allowlist for ping targets: DNS hostnames and IPv4 literals only.
+// Rejects shell metacharacters, whitespace and leading '-' (option injection).
+const PING_HOST_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+
 app.get('/api/ping', (req: Request, res: Response) => {
   const host: string = req.query.host as string;
-  // Vulnerable: User input directly in exec command
-  exec(`ping -c 3 ${host}`, (error: any, stdout: string, stderr: string) => {
+  if (!host || host.length > 253 || !PING_HOST_PATTERN.test(host)) {
+    res.status(400).json({ success: false, message: 'Invalid host' });
+    return;
+  }
+  // Fixed (CWE-78): no shell, argv array passed to execFile, host validated above
+  execFile('ping', ['-c', '3', host], (error: any, stdout: string, stderr: string) => {
     if (error) {
       res.json({ error: error.message, stdout, stderr });
     } else {
@@ -96,25 +131,72 @@ app.get('/api/ping', (req: Request, res: Response) => {
   });
 });
 
-// VULNERABILITY: Path Traversal (CWE-22)
+// Canonical uploads directory: the only location /api/files may read from.
+const UPLOADS_DIR: string = path.resolve(__dirname, '../uploads');
+
+// Allowlist for upload filenames: a single path segment of safe characters.
+// Rejects path separators, absolute paths, null bytes and any traversal
+// sequence, so a denylist string-replace of '..' is not needed.
+const UPLOAD_FILENAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,254}$/;
+
 app.get('/api/files', (req: Request, res: Response) => {
   const filename: string = req.query.filename as string;
-  // Vulnerable: No sanitization of file path
-  const filePath: string = path.join(__dirname, '../uploads', filename);
-  fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
-    if (err) {
+  // Fixed (CWE-22): filename is allowlisted before it reaches the filesystem
+  if (!filename || !UPLOAD_FILENAME_PATTERN.test(filename)) {
+    res.status(400).json({ error: 'Invalid filename' });
+    return;
+  }
+  // Fixed (CWE-22): the name that reaches the filesystem comes from the uploads
+  // directory listing, not from the request string. The request can only select
+  // one of the names the directory itself reports, and every such name is a
+  // single path segment that already exists directly inside UPLOADS_DIR, so
+  // escaping the directory is structurally impossible rather than merely
+  // rejected, and no subdirectory can be reached.
+  fs.readdir(UPLOADS_DIR, (dirErr: NodeJS.ErrnoException | null, entries: string[]) => {
+    if (dirErr) {
       res.status(404).json({ error: 'File not found' });
-    } else {
-      res.send(data);
+      return;
     }
+    let canonicalName: string = null;
+    for (const entry of entries) {
+      if (entry === filename) {
+        canonicalName = entry;
+        break;
+      }
+    }
+    if (!canonicalName) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+    // Fixed (CWE-22): this handler no longer assembles a filesystem path at
+    // all. Express resolves the name against the fixed `root` and applies its
+    // own hardened containment check (send), rejecting anything that would
+    // leave UPLOADS_DIR, so confinement no longer depends on a hand-written
+    // prefix comparison. Serving the file this way also gives it a
+    // Content-Type derived from its extension instead of the text/html that
+    // the previous utf8-read-then-send applied to every download, and
+    // 'nosniff' stops the browser from re-interpreting an upload as markup on
+    // this origin. The file is streamed rather than buffered in memory.
+    res.sendFile(canonicalName, {
+      root: UPLOADS_DIR,
+      dotfiles: 'deny',
+      headers: { 'X-Content-Type-Options': 'nosniff' }
+    }, (sendErr: any) => {
+      if (sendErr && !res.headersSent) {
+        res.status(404).json({ error: 'File not found' });
+      }
+    });
   });
 });
 
-// VULNERABILITY: Cross-Site Scripting (XSS) (CWE-79)
 app.get('/api/search', (req: Request, res: Response) => {
   const query: string = req.query.query as string;
-  // Vulnerable: Reflects user input without sanitization
-  res.send(`<h1>Search Results for: ${query}</h1>`);
+  // Fixed (CWE-79): contextual output encoding. The reflected value is
+  // HTML-escaped (& < > " ') before it is interpolated into the markup, so it
+  // stays inert text and cannot open a tag or attribute. This is encoding, not
+  // a denylist of dangerous tags, so it holds for any payload.
+  const safeQuery: string = _.escape(query);
+  res.send(`<h1>Search Results for: ${safeQuery}</h1>`);
 });
 
 // VULNERABILITY: Server-Side Request Forgery (SSRF) (CWE-918)
@@ -129,12 +211,120 @@ app.get('/api/proxy', async (req: Request, res: Response) => {
   }
 });
 
-// VULNERABILITY: Remote Code Execution via eval() (CWE-94)
+// Allowlist for arithmetic expressions: digits, decimal points, whitespace,
+// parentheses and the operators + - * / % only. Anything else is rejected
+// before parsing, so identifiers, calls and property access can never appear.
+const SAFE_EXPRESSION_PATTERN = /^[0-9.+\-*/%()\s]+$/;
+const MAX_EXPRESSION_LENGTH = 256;
+
+// Fixed (CWE-95): user input is never evaluated as code. The expression is
+// validated against the allowlist above and then evaluated by this small
+// recursive-descent parser. No eval / new Function / vm is involved.
+function evaluateArithmetic(expression: string): number {
+  if (typeof expression !== 'string') {
+    throw new Error('Invalid expression');
+  }
+  const source: string = expression.trim();
+  if (!source || source.length > MAX_EXPRESSION_LENGTH || !SAFE_EXPRESSION_PATTERN.test(source)) {
+    throw new Error('Invalid expression');
+  }
+
+  let pos: number = 0;
+
+  function skipWhitespace(): void {
+    while (pos < source.length && /\s/.test(source[pos])) {
+      pos++;
+    }
+  }
+
+  // primary := ('+' | '-') primary | '(' sum ')' | number
+  function parsePrimary(): number {
+    skipWhitespace();
+    const char: string = source[pos];
+    if (char === '+' || char === '-') {
+      pos++;
+      const operand: number = parsePrimary();
+      return char === '-' ? -operand : operand;
+    }
+    if (char === '(') {
+      pos++;
+      const inner: number = parseSum();
+      skipWhitespace();
+      if (source[pos] !== ')') {
+        throw new Error('Unbalanced parentheses');
+      }
+      pos++;
+      return inner;
+    }
+    const start: number = pos;
+    while (pos < source.length && source[pos] >= '0' && source[pos] <= '9') {
+      pos++;
+    }
+    if (source[pos] === '.') {
+      pos++;
+      while (pos < source.length && source[pos] >= '0' && source[pos] <= '9') {
+        pos++;
+      }
+    }
+    if (pos === start) {
+      throw new Error('Invalid expression');
+    }
+    const value: number = Number(source.slice(start, pos));
+    if (!isFinite(value)) {
+      throw new Error('Invalid number');
+    }
+    return value;
+  }
+
+  // product := primary (('*' | '/' | '%') primary)*
+  function parseProduct(): number {
+    let value: number = parsePrimary();
+    for (;;) {
+      skipWhitespace();
+      const operator: string = source[pos];
+      if (operator !== '*' && operator !== '/' && operator !== '%') {
+        return value;
+      }
+      pos++;
+      const right: number = parsePrimary();
+      if (operator === '*') {
+        value = value * right;
+      } else {
+        if (right === 0) {
+          throw new Error('Division by zero');
+        }
+        value = operator === '/' ? value / right : value % right;
+      }
+    }
+  }
+
+  // sum := product (('+' | '-') product)*
+  function parseSum(): number {
+    let value: number = parseProduct();
+    for (;;) {
+      skipWhitespace();
+      const operator: string = source[pos];
+      if (operator !== '+' && operator !== '-') {
+        return value;
+      }
+      pos++;
+      const right: number = parseProduct();
+      value = operator === '+' ? value + right : value - right;
+    }
+  }
+
+  const result: number = parseSum();
+  skipWhitespace();
+  if (pos !== source.length) {
+    throw new Error('Invalid expression');
+  }
+  return result;
+}
+
 app.post('/api/calculate', (req: Request, res: Response) => {
   const { expression } = req.body;
   try {
-    // Vulnerable: Direct eval of user input
-    const result = eval(expression);
+    const result: number = evaluateArithmetic(expression);
     res.json({ result });
   } catch (error: any) {
     res.status(400).json({ error: error.message });
@@ -232,11 +422,51 @@ app.get('/api/token', (req: Request, res: Response) => {
   res.json({ token });
 });
 
-// VULNERABILITY: Open Redirect (CWE-601)
+// Internal base used only to resolve a requested redirect destination for
+// validation. It is never sent to the client.
+const REDIRECT_VALIDATION_BASE = 'https://redirect.invalid';
+const MAX_REDIRECT_LENGTH = 2048;
+
+// Allowlist for /redirect destinations: application-relative paths on this
+// origin only. Validation is done on the parsed URL rather than substring or
+// startsWith checks on the raw string, so an absolute URL, a protocol-relative
+// '//evil.com', its backslash variants and non-http(s) schemes such as
+// 'javascript:' all resolve to a different origin and are rejected. Returns the
+// safe path (re-serialized from the parser) or null when not allowed.
+function safeRedirectPath(target: string): string {
+  if (typeof target !== 'string' || !target || target.length > MAX_REDIRECT_LENGTH) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(target, REDIRECT_VALIDATION_BASE);
+  } catch (error: any) {
+    return null;
+  }
+  if (parsed.origin !== REDIRECT_VALIDATION_BASE) {
+    return null;
+  }
+  // Only the path/query/fragment the parser recognised is used; a normalized
+  // path that would still be read as protocol-relative by a browser (leading
+  // '//') is not a valid same-origin destination.
+  const redirectPath: string = parsed.pathname + parsed.search + parsed.hash;
+  if (redirectPath.charAt(0) !== '/' || redirectPath.charAt(1) === '/') {
+    return null;
+  }
+  return redirectPath;
+}
+
 app.get('/redirect', (req: Request, res: Response) => {
   const url: string = req.query.url as string;
-  // Vulnerable: No validation of redirect URL
-  res.redirect(url);
+  // Fixed (CWE-601): the destination is validated against the same-origin
+  // allowlist above before any redirect happens, and only the re-serialized
+  // safe path is used as the Location value.
+  const safePath: string = safeRedirectPath(url);
+  if (!safePath) {
+    res.status(400).json({ error: 'Invalid redirect target' });
+    return;
+  }
+  res.redirect(safePath);
 });
 
 // VULNERABILITY: Prototype Pollution (CWE-1321)
