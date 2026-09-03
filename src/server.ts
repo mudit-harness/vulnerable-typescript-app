@@ -103,11 +103,28 @@ app.get('/api/ping', (req: Request, res: Response) => {
   });
 });
 
-// VULNERABILITY: Path Traversal (CWE-22)
+// Canonical uploads directory: the only location /api/files may read from.
+const UPLOADS_DIR: string = path.resolve(__dirname, '../uploads');
+
+// Allowlist for upload filenames: a single path segment of safe characters.
+// Rejects path separators, absolute paths, null bytes and any traversal
+// sequence, so a denylist string-replace of '..' is not needed.
+const UPLOAD_FILENAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,254}$/;
+
 app.get('/api/files', (req: Request, res: Response) => {
   const filename: string = req.query.filename as string;
-  // Vulnerable: No sanitization of file path
-  const filePath: string = path.join(__dirname, '../uploads', filename);
+  // Fixed (CWE-22): filename is allowlisted before it reaches the filesystem
+  if (!filename || !UPLOAD_FILENAME_PATTERN.test(filename)) {
+    res.status(400).json({ error: 'Invalid filename' });
+    return;
+  }
+  // Fixed (CWE-22): canonicalize the target and confine it to UPLOADS_DIR, so
+  // the resolved path can never escape the intended destination directory
+  const filePath: string = path.resolve(UPLOADS_DIR, filename);
+  if (filePath !== path.join(UPLOADS_DIR, filename) || !filePath.startsWith(UPLOADS_DIR + path.sep)) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
   fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
     if (err) {
       res.status(404).json({ error: 'File not found' });
