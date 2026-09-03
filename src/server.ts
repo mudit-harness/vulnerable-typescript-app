@@ -134,11 +134,14 @@ app.get('/api/files', (req: Request, res: Response) => {
   });
 });
 
-// VULNERABILITY: Cross-Site Scripting (XSS) (CWE-79)
 app.get('/api/search', (req: Request, res: Response) => {
   const query: string = req.query.query as string;
-  // Vulnerable: Reflects user input without sanitization
-  res.send(`<h1>Search Results for: ${query}</h1>`);
+  // Fixed (CWE-79): contextual output encoding. The reflected value is
+  // HTML-escaped (& < > " ') before it is interpolated into the markup, so it
+  // stays inert text and cannot open a tag or attribute. This is encoding, not
+  // a denylist of dangerous tags, so it holds for any payload.
+  const safeQuery: string = _.escape(query);
+  res.send(`<h1>Search Results for: ${safeQuery}</h1>`);
 });
 
 // VULNERABILITY: Server-Side Request Forgery (SSRF) (CWE-918)
