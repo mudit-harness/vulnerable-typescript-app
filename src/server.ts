@@ -146,11 +146,12 @@ app.get('/api/files', (req: Request, res: Response) => {
     res.status(400).json({ error: 'Invalid filename' });
     return;
   }
-  // Fixed (CWE-22): the served path is built from the uploads directory
-  // listing, not from the request string. The request can only select one of
-  // the names the directory itself reports, and every such name is a single
-  // path segment that already exists directly inside UPLOADS_DIR, so escaping
-  // the directory is structurally impossible rather than merely rejected.
+  // Fixed (CWE-22): the name that reaches the filesystem comes from the uploads
+  // directory listing, not from the request string. The request can only select
+  // one of the names the directory itself reports, and every such name is a
+  // single path segment that already exists directly inside UPLOADS_DIR, so
+  // escaping the directory is structurally impossible rather than merely
+  // rejected, and no subdirectory can be reached.
   fs.readdir(UPLOADS_DIR, (dirErr: NodeJS.ErrnoException | null, entries: string[]) => {
     if (dirErr) {
       res.status(404).json({ error: 'File not found' });
@@ -167,17 +168,22 @@ app.get('/api/files', (req: Request, res: Response) => {
       res.status(404).json({ error: 'File not found' });
       return;
     }
-    // Defence in depth: confine the directory-listing entry to UPLOADS_DIR.
-    const filePath: string = path.join(UPLOADS_DIR, canonicalName);
-    if (!filePath.startsWith(UPLOADS_DIR + path.sep)) {
-      res.status(403).json({ error: 'Forbidden' });
-      return;
-    }
-    fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
-      if (err) {
+    // Fixed (CWE-22): this handler no longer assembles a filesystem path at
+    // all. Express resolves the name against the fixed `root` and applies its
+    // own hardened containment check (send), rejecting anything that would
+    // leave UPLOADS_DIR, so confinement no longer depends on a hand-written
+    // prefix comparison. Serving the file this way also gives it a
+    // Content-Type derived from its extension instead of the text/html that
+    // the previous utf8-read-then-send applied to every download, and
+    // 'nosniff' stops the browser from re-interpreting an upload as markup on
+    // this origin. The file is streamed rather than buffered in memory.
+    res.sendFile(canonicalName, {
+      root: UPLOADS_DIR,
+      dotfiles: 'deny',
+      headers: { 'X-Content-Type-Options': 'nosniff' }
+    }, (sendErr: any) => {
+      if (sendErr && !res.headersSent) {
         res.status(404).json({ error: 'File not found' });
-      } else {
-        res.send(data);
       }
     });
   });
