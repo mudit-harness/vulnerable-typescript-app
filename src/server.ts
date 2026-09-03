@@ -146,19 +146,40 @@ app.get('/api/files', (req: Request, res: Response) => {
     res.status(400).json({ error: 'Invalid filename' });
     return;
   }
-  // Fixed (CWE-22): canonicalize the target and confine it to UPLOADS_DIR, so
-  // the resolved path can never escape the intended destination directory
-  const filePath: string = path.resolve(UPLOADS_DIR, filename);
-  if (filePath !== path.join(UPLOADS_DIR, filename) || !filePath.startsWith(UPLOADS_DIR + path.sep)) {
-    res.status(403).json({ error: 'Forbidden' });
-    return;
-  }
-  fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
-    if (err) {
+  // Fixed (CWE-22): the served path is built from the uploads directory
+  // listing, not from the request string. The request can only select one of
+  // the names the directory itself reports, and every such name is a single
+  // path segment that already exists directly inside UPLOADS_DIR, so escaping
+  // the directory is structurally impossible rather than merely rejected.
+  fs.readdir(UPLOADS_DIR, (dirErr: NodeJS.ErrnoException | null, entries: string[]) => {
+    if (dirErr) {
       res.status(404).json({ error: 'File not found' });
-    } else {
-      res.send(data);
+      return;
     }
+    let canonicalName: string = null;
+    for (const entry of entries) {
+      if (entry === filename) {
+        canonicalName = entry;
+        break;
+      }
+    }
+    if (!canonicalName) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+    // Defence in depth: confine the directory-listing entry to UPLOADS_DIR.
+    const filePath: string = path.join(UPLOADS_DIR, canonicalName);
+    if (!filePath.startsWith(UPLOADS_DIR + path.sep)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
+      if (err) {
+        res.status(404).json({ error: 'File not found' });
+      } else {
+        res.send(data);
+      }
+    });
   });
 });
 
