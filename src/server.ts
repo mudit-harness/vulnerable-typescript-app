@@ -105,11 +105,28 @@ app.get('/api/ping', (req: Request, res: Response) => {
   });
 });
 
-// VULNERABILITY: Path Traversal (CWE-22)
+// Allowlist: a single safe basename - letters, digits, '_', '-', '.' only.
+// No path separators, no leading dot, and '..' can never match.
+const UPLOAD_FILENAME_ALLOWLIST: RegExp = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
+
+// Canonical root of the intended destination directory, resolved once.
+const UPLOADS_ROOT: string = path.resolve(__dirname, '../uploads');
+
 app.get('/api/files', (req: Request, res: Response) => {
   const filename: string = req.query.filename as string;
-  // Vulnerable: No sanitization of file path
-  const filePath: string = path.join(__dirname, '../uploads', filename);
+  // Fixed (CWE-22): only accept a bare filename - reject separators and traversal
+  if (typeof filename !== 'string' || filename.length > 255 ||
+      !UPLOAD_FILENAME_ALLOWLIST.test(filename)) {
+    res.status(400).json({ error: 'Invalid filename' });
+    return;
+  }
+  // Fixed (CWE-22): canonicalize the candidate and confine it to UPLOADS_ROOT
+  // using a path-boundary-safe check, so a sibling like '../uploadsevil' cannot match
+  const filePath: string = path.resolve(UPLOADS_ROOT, filename);
+  if (filePath !== UPLOADS_ROOT && !filePath.startsWith(UPLOADS_ROOT + path.sep)) {
+    res.status(400).json({ error: 'Invalid filename' });
+    return;
+  }
   fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
     if (err) {
       res.status(404).json({ error: 'File not found' });
