@@ -138,15 +138,119 @@ app.get('/api/proxy', async (req: Request, res: Response) => {
   }
 });
 
-// VULNERABILITY: Remote Code Execution via eval() (CWE-94)
+// Allowlist: decimal numbers, the four arithmetic operators, modulo, parentheses
+// and whitespace only. Simple character class, so it cannot backtrack (no ReDoS).
+const ARITHMETIC_EXPRESSION: RegExp = /^[0-9+\-*/%().\s]+$/;
+const MAX_EXPRESSION_LENGTH: number = 256;
+
+// Fixed (CWE-94/95): arithmetic is evaluated by this small recursive-descent
+// parser instead of eval(). Request data is only ever read as numbers and
+// operators - it is never handed to a dynamic-code sink (no eval, no Function,
+// no vm), so arbitrary code execution is not possible.
+function evaluateArithmetic(input: string): number {
+  let pos: number = 0;
+
+  function skipWhitespace(): void {
+    while (pos < input.length && (input[pos] === ' ' || input[pos] === '\t')) {
+      pos++;
+    }
+  }
+
+  function parseNumber(): number {
+    const start: number = pos;
+    while (pos < input.length && input[pos] >= '0' && input[pos] <= '9') {
+      pos++;
+    }
+    if (input[pos] === '.') {
+      pos++;
+      while (pos < input.length && input[pos] >= '0' && input[pos] <= '9') {
+        pos++;
+      }
+    }
+    if (pos === start || input.slice(start, pos) === '.') {
+      throw new Error('Invalid expression');
+    }
+    return parseFloat(input.slice(start, pos));
+  }
+
+  function parseFactor(): number {
+    skipWhitespace();
+    if (input[pos] === '+') {
+      pos++;
+      return parseFactor();
+    }
+    if (input[pos] === '-') {
+      pos++;
+      return -parseFactor();
+    }
+    if (input[pos] === '(') {
+      pos++;
+      const value: number = parseSum();
+      skipWhitespace();
+      if (input[pos] !== ')') {
+        throw new Error('Invalid expression');
+      }
+      pos++;
+      return value;
+    }
+    return parseNumber();
+  }
+
+  function parseProduct(): number {
+    let value: number = parseFactor();
+    for (;;) {
+      skipWhitespace();
+      const operator: string = input[pos];
+      if (operator !== '*' && operator !== '/' && operator !== '%') {
+        return value;
+      }
+      pos++;
+      const right: number = parseFactor();
+      if (operator === '*') {
+        value = value * right;
+      } else if (operator === '/') {
+        value = value / right;
+      } else {
+        value = value % right;
+      }
+    }
+  }
+
+  function parseSum(): number {
+    let value: number = parseProduct();
+    for (;;) {
+      skipWhitespace();
+      const operator: string = input[pos];
+      if (operator !== '+' && operator !== '-') {
+        return value;
+      }
+      pos++;
+      const right: number = parseProduct();
+      value = operator === '+' ? value + right : value - right;
+    }
+  }
+
+  const result: number = parseSum();
+  skipWhitespace();
+  if (pos !== input.length || !Number.isFinite(result)) {
+    throw new Error('Invalid expression');
+  }
+  return result;
+}
+
 app.post('/api/calculate', (req: Request, res: Response) => {
   const { expression } = req.body;
+  // Fixed (CWE-94/95): reject anything that is not a plain arithmetic expression
+  if (typeof expression !== 'string' || expression.length === 0 ||
+      expression.length > MAX_EXPRESSION_LENGTH || !ARITHMETIC_EXPRESSION.test(expression)) {
+    res.status(400).json({ error: 'Invalid expression' });
+    return;
+  }
   try {
-    // Vulnerable: Direct eval of user input
-    const result = eval(expression);
+    const result: number = evaluateArithmetic(expression);
     res.json({ result });
   } catch (error: any) {
-    res.status(400).json({ error: error.message });
+    res.status(400).json({ error: 'Invalid expression' });
   }
 });
 
