@@ -7,6 +7,7 @@ import * as cookieParser from 'cookie-parser';
 import * as session from 'express-session';
 import * as jwt from 'jsonwebtoken';
 import { execFile } from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as axios from 'axios';
@@ -32,9 +33,26 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Fixed (CWE-798): the session secret is no longer a literal in source. It is read
+// from the SESSION_SECRET environment variable (see the SESSION_SECRET entry in .env).
+// In a production-like environment a missing value fails closed and loudly; otherwise a
+// random per-process value is generated so local runs never rely on a committed default.
+function loadSessionSecret(): string {
+  const fromEnv: string = process.env.SESSION_SECRET;
+  if (fromEnv && fromEnv.length > 0) {
+    return fromEnv;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET environment variable must be set');
+  }
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const SESSION_SECRET: string = loadSessionSecret();
+
 // VULNERABILITY: Insecure session configuration (CWE-1004)
 app.use(session({
-  secret: 'insecure-typescript-session-secret',
+  secret: SESSION_SECRET,
   resave: true,
   saveUninitialized: true,
   cookie: {
