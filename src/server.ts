@@ -12,7 +12,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as axios from 'axios';
 import * as xml2js from 'xml2js';
-import * as escapeHtml from 'escape-html';
 import * as yaml from 'js-yaml';
 import * as _ from 'lodash';
 import { URL } from 'url';
@@ -200,11 +199,16 @@ app.get('/api/files', (req: Request, res: Response) => {
 
 app.get('/api/search', (req: Request, res: Response) => {
   const query: string = typeof req.query.query === 'string' ? req.query.query : '';
-  // Fixed (CWE-79): the reflected value is HTML-entity encoded (escape-html escapes
-  // & < > " '), so user input can only ever render as text inside the <h1> element -
-  // it can never open a tag or an attribute context and become executable script.
-  const safeQuery: string = escapeHtml(query);
-  res.send(`<h1>Search Results for: ${safeQuery}</h1>`);
+  // Fixed (CWE-79): this endpoint no longer builds an HTML document out of request data.
+  // The reflected search term is returned as a value in a structured JSON payload, so
+  // there is no HTML context for it to break out of. res.json() serializes with
+  // JSON.stringify and sends 'Content-Type: application/json', and 'nosniff' stops a
+  // browser from content-type sniffing the body back into HTML, so markup in the query
+  // string can never be parsed or executed as script.
+  // NOTE: response shape changed from an HTML fragment to JSON:
+  //   { "query": "<the search term>", "results": [] }
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.json({ query: query, results: [] as string[] });
 });
 
 // VULNERABILITY: Server-Side Request Forgery (SSRF) (CWE-918)
