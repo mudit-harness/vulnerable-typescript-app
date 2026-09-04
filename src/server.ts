@@ -158,19 +158,43 @@ app.get('/api/files', (req: Request, res: Response) => {
     res.status(400).json({ error: 'Invalid filename' });
     return;
   }
-  // Fixed (CWE-22): canonicalize the candidate and confine it to UPLOADS_ROOT
-  // using a path-boundary-safe check, so a sibling like '../uploadsevil' cannot match
-  const filePath: string = path.resolve(UPLOADS_ROOT, filename);
-  if (filePath !== UPLOADS_ROOT && !filePath.startsWith(UPLOADS_ROOT + path.sep)) {
-    res.status(400).json({ error: 'Invalid filename' });
-    return;
-  }
-  fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
-    if (err) {
+  // Fixed (CWE-22): the served path is never composed from the request value. The real
+  // contents of the intended destination are enumerated, and the requested basename is
+  // used only as an equality key to select one existing entry. The path that is opened is
+  // then built from the filesystem-provided entry name, so the request string can never
+  // steer the lookup outside the uploads directory - at worst it fails to match and 404s.
+  fs.readdir(UPLOADS_ROOT, (dirErr: NodeJS.ErrnoException | null, entries: string[]) => {
+    if (dirErr) {
       res.status(404).json({ error: 'File not found' });
-    } else {
-      res.send(data);
+      return;
     }
+    const requested: string = path.basename(filename);
+    let entryName: string = null;
+    for (let i = 0; i < entries.length; i += 1) {
+      if (entries[i] === requested) {
+        entryName = entries[i];
+        break;
+      }
+    }
+    if (entryName === null) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+    // Defence in depth: canonicalize the filesystem-provided entry name and confine it to
+    // UPLOADS_ROOT with a path-boundary-safe check, so a sibling directory such as
+    // '../uploadsevil' cannot match even if this code is later refactored.
+    const filePath: string = path.join(UPLOADS_ROOT, entryName);
+    if (filePath !== UPLOADS_ROOT && !filePath.startsWith(UPLOADS_ROOT + path.sep)) {
+      res.status(400).json({ error: 'Invalid filename' });
+      return;
+    }
+    fs.readFile(filePath, 'utf8', (err: NodeJS.ErrnoException | null, data: string) => {
+      if (err) {
+        res.status(404).json({ error: 'File not found' });
+      } else {
+        res.send(data);
+      }
+    });
   });
 });
 
