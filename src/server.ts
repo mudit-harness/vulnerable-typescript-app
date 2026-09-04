@@ -6,7 +6,7 @@ import * as bodyParser from 'body-parser';
 import * as cookieParser from 'cookie-parser';
 import * as session from 'express-session';
 import * as jwt from 'jsonwebtoken';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as axios from 'axios';
@@ -83,11 +83,20 @@ app.post('/api/login', (req: Request, res: Response) => {
   }
 });
 
-// VULNERABILITY: Command Injection (CWE-78)
+// Allowlist: DNS hostname labels or IPv4 addresses only - no shell metacharacters,
+// no leading '-' (so the value can never be read as a ping option).
+const HOSTNAME_ALLOWLIST: RegExp = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
 app.get('/api/ping', (req: Request, res: Response) => {
   const host: string = req.query.host as string;
-  // Vulnerable: User input directly in exec command
-  exec(`ping -c 3 ${host}`, (error: any, stdout: string, stderr: string) => {
+  // Fixed (CWE-78): reject anything that is not a plain hostname or IPv4 address
+  if (typeof host !== 'string' || host.length > 253 || !HOSTNAME_ALLOWLIST.test(host)) {
+    res.status(400).json({ error: 'Invalid host' });
+    return;
+  }
+  // Fixed (CWE-78): argv array via execFile - no shell is spawned, so the
+  // validated host cannot be interpreted as a shell command
+  execFile('ping', ['-c', '3', host], (error: any, stdout: string, stderr: string) => {
     if (error) {
       res.json({ error: error.message, stdout, stderr });
     } else {
