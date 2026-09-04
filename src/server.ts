@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as axios from 'axios';
 import * as xml2js from 'xml2js';
+import * as escapeHtml from 'escape-html';
 import * as yaml from 'js-yaml';
 import * as _ from 'lodash';
 import { Request, Response } from 'express';
@@ -136,11 +137,13 @@ app.get('/api/files', (req: Request, res: Response) => {
   });
 });
 
-// VULNERABILITY: Cross-Site Scripting (XSS) (CWE-79)
 app.get('/api/search', (req: Request, res: Response) => {
-  const query: string = req.query.query as string;
-  // Vulnerable: Reflects user input without sanitization
-  res.send(`<h1>Search Results for: ${query}</h1>`);
+  const query: string = typeof req.query.query === 'string' ? req.query.query : '';
+  // Fixed (CWE-79): the reflected value is HTML-entity encoded (escape-html escapes
+  // & < > " '), so user input can only ever render as text inside the <h1> element -
+  // it can never open a tag or an attribute context and become executable script.
+  const safeQuery: string = escapeHtml(query);
+  res.send(`<h1>Search Results for: ${safeQuery}</h1>`);
 });
 
 // VULNERABILITY: Server-Side Request Forgery (SSRF) (CWE-918)
