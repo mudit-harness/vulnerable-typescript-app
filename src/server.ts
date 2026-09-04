@@ -22,7 +22,6 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // VULNERABILITY: Hardcoded secrets (CWE-798)
-const JWT_SECRET: string = 'super_secret_typescript_key_12345';
 const ADMIN_PASSWORD: string = 'admin123';
 const DB_PASSWORD: string = 'password123';
 
@@ -50,6 +49,25 @@ function loadSessionSecret(): string {
 }
 
 const SESSION_SECRET: string = loadSessionSecret();
+
+// Fixed (CWE-798): the JWT signing key is no longer a literal in source. It is read from
+// the JWT_SECRET environment variable (see the JWT_SECRET entry in .env), mirroring how
+// SESSION_SECRET is loaded above. A missing value fails closed in a production-like
+// environment; otherwise a random per-process key is generated, so local runs never depend
+// on a committed default. NOTE: the previously committed key must be treated as exposed and
+// rotated wherever it was ever used, because it remains in git history.
+function loadJwtSecret(): string {
+  const fromEnv: string = process.env.JWT_SECRET;
+  if (fromEnv && fromEnv.length > 0) {
+    return fromEnv;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET environment variable must be set');
+  }
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const JWT_SECRET: string = loadJwtSecret();
 
 // VULNERABILITY: Insecure session configuration (CWE-1004)
 app.use(session({
