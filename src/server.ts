@@ -15,6 +15,7 @@ import * as xml2js from 'xml2js';
 import * as escapeHtml from 'escape-html';
 import * as yaml from 'js-yaml';
 import * as _ from 'lodash';
+import { URL } from 'url';
 import { Request, Response } from 'express';
 
 const app = express();
@@ -383,11 +384,56 @@ app.get('/api/token', (req: Request, res: Response) => {
   res.json({ token });
 });
 
-// VULNERABILITY: Open Redirect (CWE-601)
+// Fixed (CWE-601): the redirect destination is validated against an allow-list instead of
+// being taken verbatim from the query string. Only same-origin relative paths and the
+// explicitly trusted absolute destinations below are accepted; anything else (other hosts,
+// protocol-relative '//evil.tld', 'javascript:', 'data:', ...) is rejected with 400.
+const REDIRECT_ALLOWED_HOSTS: ReadonlyArray<string> = ['www.example.com'];
+
+function resolveRedirectTarget(candidate: string): string | null {
+  if (typeof candidate !== 'string' || candidate.length === 0) {
+    return null;
+  }
+  // Browsers strip leading/embedded whitespace and control characters before parsing a
+  // location, so reject them rather than trying to guess what would be navigated to.
+  for (let i = 0; i < candidate.length; i += 1) {
+    const code: number = candidate.charCodeAt(i);
+    if (code <= 0x20 || code === 0x7f) {
+      return null;
+    }
+  }
+  if (candidate.charAt(0) === '/') {
+    // A single leading slash is same-origin. '//host' and '/\host' are protocol-relative
+    // forms that leave this origin, so they are not accepted.
+    if (candidate.charAt(1) === '/' || candidate.charAt(1) === '\\') {
+      return null;
+    }
+    return candidate;
+  }
+  // Otherwise it must be an absolute http(s) URL pointing at an allow-listed host.
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch (err) {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return null;
+  }
+  if (REDIRECT_ALLOWED_HOSTS.indexOf(parsed.host.toLowerCase()) === -1) {
+    return null;
+  }
+  return parsed.href;
+}
+
 app.get('/redirect', (req: Request, res: Response) => {
   const url: string = req.query.url as string;
-  // Vulnerable: No validation of redirect URL
-  res.redirect(url);
+  const target: string | null = resolveRedirectTarget(url);
+  if (target === null) {
+    res.status(400).json({ error: 'Invalid redirect target' });
+    return;
+  }
+  res.redirect(target);
 });
 
 // VULNERABILITY: Prototype Pollution (CWE-1321)
